@@ -1,0 +1,18 @@
+﻿
+> one01-frontend@0.1.0 dev
+> next dev
+
+  Γû▓ Next.js 14.2.4
+  - Local:        http://localhost:3000
+  - Environments: .env.local
+
+ Γ£ô Starting...
+ Γ£ô Ready in 13.2s
+ Γùï Compiling / ...
+ Γ£ô Compiled / in 13.7s (547 modules)
+ GET / 200 in 14422ms
+ Γ£ô Compiled in 817ms (312 modules)
+ Γùï Compiling /dashboard ...
+ Γ£ô Compiled /dashboard in 1233ms (754 modules)
+ Γùï Compiling /dashboard/learn/[subjectId] ...
+ Γ£ô Compiled /dashboard/learn/[subjectId] in 3.1s (2110 modules)

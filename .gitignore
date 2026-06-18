@@ -1,7 +1,48 @@
-# Local secrets
+cat > .gitignore <<'EOF'
+# Secrets
 .env
-!.env.example
-# Python generated files
+.env.*
+
+# Python
 venv/
 __pycache__/
 *.py[cod]
+
+# Node
+node_modules/
+.next/
+dist/
+build/
+
+# Logs
+*.log
+err.txt
+pip_log.txt
+
+# IDE files
+.idea/
+EOFcat >> .gitignore <<'EOF'
+
+# Secrets
+.env
+.env.*
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Node
+node_modules/
+.next/
+dist/
+build/
+
+# IDE
+.idea/
+
+# Logs
+*.log
+err.txt
+pip_log.txt

@@ -1,0 +1,136 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=DM+Mono:wght@300;400&display=swap');
+@import 'katex/dist/katex.min.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-display: 'DM Serif Display', serif;
+  --font-body: 'DM Sans', sans-serif;
+  --font-mono: 'DM Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-body);
+  background-color: #f5f4ef;
+  color: #0a0a0a;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #c8a96e;
+  border-radius: 2px;
+}
+
+/* ── Selection ── */
+::selection {
+  background: #c8a96e33;
+  color: #0a0a0a;
+}
+
+/* ── Markdown content styles ── */
+.prose-lead h1 { font-family: var(--font-display); font-size: 1.6rem; margin: 1.5rem 0 0.75rem; color: #0a0a0a; }
+.prose-lead h2 { font-family: var(--font-display); font-size: 1.3rem; margin: 1.25rem 0 0.6rem; color: #1a1a2e; }
+.prose-lead h3 { font-size: 1.05rem; font-weight: 500; margin: 1rem 0 0.5rem; color: #1a1a2e; }
+.prose-lead p  { margin: 0.75rem 0; line-height: 1.75; font-size: 0.95rem; color: #1a1a2e; }
+.prose-lead ul, .prose-lead ol { margin: 0.75rem 0 0.75rem 1.5rem; font-size: 0.95rem; color: #1a1a2e; }
+.prose-lead li { margin: 0.35rem 0; line-height: 1.7; }
+.prose-lead code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: #e8e6de;
+  padding: 0.15em 0.4em;
+  border-radius: 3px;
+  color: #1a1a2e;
+}
+.prose-lead pre {
+  background: #1a1a2e;
+  color: #f5f4ef;
+  padding: 1rem 1.25rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 0.875rem;
+  margin: 1rem 0;
+}
+.prose-lead pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+.prose-lead blockquote {
+  border-left: 3px solid #c8a96e;
+  padding-left: 1rem;
+  color: #6b6b6b;
+  font-style: italic;
+  margin: 1rem 0;
+}
+.prose-lead table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+.prose-lead th { background: #1a1a2e; color: #f5f4ef; padding: 0.6rem 0.9rem; text-align: left; font-weight: 500; }
+.prose-lead td { padding: 0.6rem 0.9rem; border-bottom: 1px solid #e2e0d8; }
+.prose-lead strong { font-weight: 500; color: #0a0a0a; }
+.prose-lead em { font-style: italic; }
+.prose-lead hr { border: none; border-top: 1px solid #e2e0d8; margin: 1.5rem 0; }
+
+/* ── Streaming cursor ── */
+.streaming-cursor::after {
+  content: '▋';
+  display: inline-block;
+  animation: blink 1s step-end infinite;
+  color: #c8a96e;
+  margin-left: 2px;
+}
+
+/* ── Chat bubble ── */
+.chat-bubble-ai {
+  background: #ffffff;
+  border: 1px solid #e2e0d8;
+  border-radius: 2px 12px 12px 12px;
+}
+.chat-bubble-user {
+  background: #1a1a2e;
+  color: #f5f4ef;
+  border-radius: 12px 2px 12px 12px;
+}
+
+/* ── Sidebar ── */
+.sidebar-item {
+  @apply flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm cursor-pointer transition-all duration-200;
+}
+.sidebar-item:hover { background: rgba(200,169,110,0.08); }
+.sidebar-item.active { background: rgba(200,169,110,0.14); color: #c8a96e; }
+
+/* ── Topic status pill ── */
+.status-pending  { @apply bg-gray-100 text-gray-500; }
+.status-in_progress { @apply bg-amber-50 text-amber-700; }
+.status-completed { @apply bg-green-50 text-green-700; }
+
+/* ── Quiz option ── */
+.quiz-option {
+  @apply w-full text-left px-4 py-3 rounded-lg border text-sm transition-all duration-200 cursor-pointer;
+  border-color: #e2e0d8;
+}
+.quiz-option:hover:not(:disabled) { border-color: #c8a96e; background: rgba(200,169,110,0.05); }
+.quiz-option.correct { border-color: #2d6a4f; background: rgba(45,106,79,0.06); color: #2d6a4f; }
+.quiz-option.wrong   { border-color: #9b2226; background: rgba(155,34,38,0.06); color: #9b2226; }
+.quiz-option.selected { border-color: #1a1a2e; background: rgba(26,26,46,0.05); }
