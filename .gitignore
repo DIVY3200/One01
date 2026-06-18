@@ -1,0 +1,7 @@
+# Local secrets
+.env
+!.env.example
+# Python generated files
+venv/
+__pycache__/
+*.py[cod]
