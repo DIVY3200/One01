@@ -168,6 +168,9 @@ docker-compose up --build
 ```
 Docker uses PostgreSQL instead of the local SQLite file, so it starts with an empty database.
 
+### Deploy online
+Free hosting with Neon (database), Render (backend) and Vercel (frontend): see [DEPLOY.md](../DEPLOY.md).
+
 ### 3. Frontend Setup
 ```bash
 cd frontend

@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 from sqlalchemy import event
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from utils.config import settings
@@ -16,13 +17,26 @@ def _normalized_url() -> str:
     return url
 
 
+def _asyncpg_options(url: str) -> str:
+    """Hosted Postgres URLs (Neon, Supabase) use libpq options that asyncpg rejects:
+    it takes ssl=require instead of sslmode=require and has no channel_binding."""
+    parsed = make_url(url)
+    query = dict(parsed.query)
+    if "sslmode" in query:
+        query["ssl"] = query.pop("sslmode")
+    query.pop("channel_binding", None)
+    return parsed.set(query=query).render_as_string(hide_password=False)
+
+
 def async_database_url() -> str:
     """DATABASE_URL with the async driver the app runs on (aiosqlite / asyncpg)."""
     url = _normalized_url()
     if url.startswith("sqlite:"):
         return "sqlite+aiosqlite:" + url[len("sqlite:"):]
     if url.startswith("postgresql:"):
-        return "postgresql+asyncpg:" + url[len("postgresql:"):]
+        url = "postgresql+asyncpg:" + url[len("postgresql:"):]
+    if url.startswith("postgresql+asyncpg:"):
+        return _asyncpg_options(url)
     return url
 
 

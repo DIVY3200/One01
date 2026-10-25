@@ -1,0 +1,23 @@
+# Render Blueprint for the One01 backend (see DEPLOY.md).
+# The frontend is deployed on Vercel and the database is hosted on Neon.
+services:
+  - type: web
+    name: one01-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    region: singapore
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      # Asked for when the Blueprint is created:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DATABASE_URL # Neon connection string
+        sync: false
+      - key: CORS_ORIGINS # e.g. ["https://one01.vercel.app"]
+        sync: false

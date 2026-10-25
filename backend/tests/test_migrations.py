@@ -60,6 +60,11 @@ def test_database_url_drivers():
         "sqlite+aiosqlite:///./test.db": ("sqlite+aiosqlite:///./test.db", "sqlite:///./test.db"),
         "postgresql://u:p@db:5432/one01": ("postgresql+asyncpg://u:p@db:5432/one01", "postgresql+psycopg2://u:p@db:5432/one01"),
         "postgres://u:p@db/one01": ("postgresql+asyncpg://u:p@db/one01", "postgresql+psycopg2://u:p@db/one01"),
+        # Neon-style URL: asyncpg needs ssl=require and no channel_binding; psycopg2 keeps libpq options
+        "postgresql://u:p@ep-x.aws.neon.tech/neondb?sslmode=require&channel_binding=require": (
+            "postgresql+asyncpg://u:p@ep-x.aws.neon.tech/neondb?ssl=require",
+            "postgresql+psycopg2://u:p@ep-x.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
+        ),
     }
     for raw, (expected_async, expected_sync) in cases.items():
         with override(DATABASE_URL=raw):
