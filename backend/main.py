@@ -52,6 +52,8 @@ def _cors_origins() -> list:
         origins = [o.strip() for o in raw.split(",") if o.strip()]
     if isinstance(origins, str):
         origins = [origins]
+    # Browsers send the origin without a trailing slash
+    origins = [o.strip().rstrip("/") for o in origins]
     # The same dev server is often opened as 127.0.0.1 instead of localhost
     origins += [o.replace("://localhost", "://127.0.0.1") for o in origins if "://localhost" in o]
     return sorted(set(origins))

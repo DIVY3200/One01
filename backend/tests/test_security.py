@@ -85,3 +85,15 @@ def test_owner_still_has_access(client, victim):
 def test_cors_only_allows_configured_origins(client, origin, allowed):
     response = client.options("/api/subjects/", headers={"Origin": origin, "Access-Control-Request-Method": "GET"})
     assert (response.headers.get("access-control-allow-origin") == origin) is allowed
+
+
+@pytest.mark.parametrize("configured", [
+    '["https://one01.vercel.app/"]',  # trailing slash
+    "https://one01.vercel.app",       # plain string instead of a JSON list
+    ' [ "https://one01.vercel.app" ] ',
+])
+def test_cors_setting_formats(configured):
+    from helpers import override
+    from main import _cors_origins
+    with override(CORS_ORIGINS=configured):
+        assert _cors_origins() == ["https://one01.vercel.app"]

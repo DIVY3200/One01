@@ -19,5 +19,6 @@ services:
         sync: false
       - key: DATABASE_URL # Neon connection string
         sync: false
-      - key: CORS_ORIGINS # e.g. ["https://one01.vercel.app"]
-        sync: false
+      # The Vercel frontend; add more addresses to the list if needed
+      - key: CORS_ORIGINS
+        value: '["https://one01.vercel.app"]'
