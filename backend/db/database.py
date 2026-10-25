@@ -1,15 +1,56 @@
+import asyncio
+from pathlib import Path
+
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from utils.config import settings
 
-# Convert postgresql:// to postgresql+asyncpg://
-DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+def _normalized_url() -> str:
+    url = settings.DATABASE_URL.strip()
+    if url.startswith("postgres://"):  # Heroku/Render style
+        url = "postgresql://" + url[len("postgres://"):]
+    return url
+
+
+def async_database_url() -> str:
+    """DATABASE_URL with the async driver the app runs on (aiosqlite / asyncpg)."""
+    url = _normalized_url()
+    if url.startswith("sqlite:"):
+        return "sqlite+aiosqlite:" + url[len("sqlite:"):]
+    if url.startswith("postgresql:"):
+        return "postgresql+asyncpg:" + url[len("postgresql:"):]
+    return url
+
+
+def sync_database_url() -> str:
+    """DATABASE_URL with a sync driver, used by Alembic migrations."""
+    url = _normalized_url()
+    if url.startswith("sqlite+aiosqlite:"):
+        return "sqlite:" + url[len("sqlite+aiosqlite:"):]
+    if url.startswith("postgresql+asyncpg:"):
+        return "postgresql+psycopg2:" + url[len("postgresql+asyncpg:"):]
+    if url.startswith("postgresql:"):
+        return "postgresql+psycopg2:" + url[len("postgresql:"):]
+    return url
+
 
 engine = create_async_engine(
-    DATABASE_URL,
+    async_database_url(),
     echo=settings.APP_ENV == "development",
     pool_pre_ping=True,
 )
+
+if engine.dialect.name == "sqlite":
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+        # SQLite ignores ON DELETE CASCADE unless foreign keys are enabled per connection.
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
@@ -22,13 +63,23 @@ class Base(DeclarativeBase):
     pass
 
 
+def run_migrations() -> None:
+    """Upgrade the schema to the latest Alembic revision.
+
+    The baseline migration only creates tables that are missing, so databases
+    created before migrations existed are adopted without losing data.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config(str(BACKEND_DIR / "alembic.ini"))
+    config.attributes["configure_logger"] = False  # keep the app's logging setup
+    command.upgrade(config, "head")
+
+
 async def init_db():
-    """Initialize database tables."""
-    async with engine.begin() as conn:
-        # Tables are created via init.sql in Docker
-        # For dev outside Docker, we use Base.metadata.create_all
-        from db.models import Base
-        await conn.run_sync(Base.metadata.create_all)
+    """Apply database migrations (creates the schema on a fresh database)."""
+    await asyncio.to_thread(run_migrations)
 
 
 async def get_db():

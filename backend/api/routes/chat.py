@@ -1,67 +1,133 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import AsyncIterator, Optional, List
 import json
 import asyncio
 import re
 
+import httpx
+
 from db.database import get_db
-from db.models import Subject, Topic, Message, UserPreferences, Progress, User
+from db.models import Subject, Topic, Message, Note, UserPreferences, Progress, User
+from agents import fallback
 from agents.orchestrator import (
     build_persona_context,
     tutor_explain_topic,
     tutor_handle_doubt,
     scribe_generate_notes,
 )
+from rag import service as rag
 from utils.auth import get_current_user
+from utils.config import settings
+from utils.ownership import owned_topic
+from utils.rate_limit import ai_rate_limit
 
 router = APIRouter()
 
+FALLBACK_MESSAGE = "Gemini is unavailable right now, so this is sample content rather than a real lesson."
+
 # ── Navigation Intent Detection ──────────────────────────────────
-NAVIGATION_PATTERNS = [
-    r"\bnext\b", r"\bmove\s+on\b", r"\bproceed\b", r"\bcontinue\b",
-    r"\bunderstood\b", r"\bgot\s+it\b", r"\blets?\s+go\b", r"\blet'?s\s+go\b",
-    r"\bnext\s+topic\b", r"\bskip\b", r"\bforward\b", r"\bready\b",
-    r"\bstart\b", r"\bbegin\b", r"\bgo\s+ahead\b", r"\bi\s+understand\b",
-    r"\bmove\s+to\s+next\b", r"\badvance\b", r"\bokay\s+next\b", r"\bok\s+next\b",
-    r"\byes\b", r"\byep\b", r"\byeah\b", r"\bsure\b", r"\bclear\b",
-]
-_NAV_RE = re.compile("|".join(NAVIGATION_PATTERNS), re.IGNORECASE)
+# A message only advances the lesson when it is made purely of "move on" words
+# ("next", "ok got it, continue", "I'm ready for the next topic"). A question
+# mark, a question word or any other content means it is answered as a doubt.
+_NAV_TRIGGERS = {
+    "next", "continue", "proceed", "skip", "advance", "forward", "ready", "start", "begin",
+    "understood", "understand", "got", "get", "clear", "ok", "okay", "yes", "yep", "yeah",
+    "sure", "move", "go", "ahead", "done",
+}
+_NAV_FILLER = {
+    "on", "it", "lets", "let's", "let", "us", "to", "the", "a", "topic", "please", "now", "i",
+    "im", "i'm", "am", "we", "can", "that", "this", "all", "good", "great", "cool", "fine",
+    "alright", "right", "perfect", "thanks", "thank", "you", "and", "so", "keep", "going",
+    "with", "one", "part", "section", "concept", "subtopic", "chapter", "lesson", "makes",
+    "sense", "for",
+}
+_QUESTION_WORDS = {
+    "what", "why", "how", "when", "where", "which", "who", "whom", "whose", "explain",
+    "describe", "define", "tell", "show", "example", "examples", "difference", "mean",
+    "means", "meaning", "confused", "confusing", "help", "not", "don't", "dont", "didn't",
+    "doesn't", "isn't",
+}
+_HF_NAV_LABEL = "navigation next proceeding continuing"
 
 
-import os
-import requests
-
-def is_navigation_command(text: str) -> bool:
-    """Detect if user input is a navigation command vs. a genuine question using Hugging Face Zero-Shot."""
-    text = text.strip()
-    if len(text) > 60:
+def navigation_intent(text: str) -> Optional[bool]:
+    """True = clearly "move on", False = a question or content, None = unsure."""
+    text = text.strip().lower().replace("’", "'")
+    if not text or len(text) > 80 or "?" in text:
         return False
+    words = re.findall(r"[a-z']+", text)
+    if not words or any(w in _QUESTION_WORDS for w in words):
+        return False
+    if not any(w in _NAV_TRIGGERS for w in words):
+        return False
+    if all(w in _NAV_TRIGGERS or w in _NAV_FILLER for w in words):
+        return True
+    return None
 
-    hf_token = os.getenv("HF_TOKEN") or "your-hf-token-here"
-    if hf_token and hf_token != "your-hf-token-here":
-        api_url = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
-        headers = {"Authorization": f"Bearer {hf_token}"}
-        payload = {
-            "inputs": text,
-            "parameters": {"candidate_labels": ["asking a question", "navigation next proceeding continuing"]}
-        }
-        try:
-            response = requests.post(api_url, headers=headers, json=payload, timeout=3.0)
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("labels", [])[0] == "navigation next proceeding continuing":
-                    return True
-                return False
-        except Exception as e:
-            print(f"HF API Error: {e}")
-            pass
 
-    # Fallback to Regex
-    return bool(_NAV_RE.search(text))
+async def _hf_says_navigation(text: str) -> Optional[bool]:
+    """Optional zero-shot tiebreaker (Hugging Face bart-large-mnli) for unsure messages."""
+    if not settings.HF_TOKEN or settings.HF_TOKEN.startswith("your-"):
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(
+                "https://api-inference.huggingface.co/models/facebook/bart-large-mnli",
+                headers={"Authorization": f"Bearer {settings.HF_TOKEN}"},
+                json={"inputs": text, "parameters": {"candidate_labels": ["asking a question", _HF_NAV_LABEL]}},
+            )
+        if response.status_code == 200:
+            labels = response.json().get("labels", [])
+            return bool(labels) and labels[0] == _HF_NAV_LABEL
+    except Exception as e:
+        print(f"HF API Error: {e}")
+    return None
+
+
+async def is_navigation_command(text: str) -> bool:
+    intent = navigation_intent(text)
+    if intent is None:
+        intent = await _hf_says_navigation(text)
+    return bool(intent)  # still unsure → answer it; skipping content by mistake is worse
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+async def _relay_tutor(chunks: AsyncIterator[str], collected: List[str]) -> AsyncIterator[str]:
+    """Forward tutor chunks as SSE text events, warning once if the tutor fell back to mock content."""
+    warned = False
+    async for chunk in chunks:
+        if not warned and "Tutor" in fallback.used():
+            warned = True
+            yield _sse({"type": "ai_fallback", "message": FALLBACK_MESSAGE})
+        collected.append(chunk)
+        yield _sse({"chunk": chunk, "type": "text"})
+
+
+def _message_metadata(sources: list, query: Optional[str] = None) -> Optional[dict]:
+    meta = {}
+    if sources:
+        meta["sources"] = sources
+        if query:
+            meta["query"] = query
+    if "Tutor" in fallback.used():
+        meta["ai_fallback"] = True
+    return meta or None
+
+
+async def _save_topic_notes(db: AsyncSession, topic: Topic, content: str) -> None:
+    """Store the Scribe's notes for a topic, without overwriting notes the student edited."""
+    note = (await db.execute(select(Note).where(Note.topic_id == topic.id))).scalar_one_or_none()
+    if note is None:
+        db.add(Note(subject_id=topic.subject_id, topic_id=topic.id, content=content, is_user_edited=False))
+    elif not note.is_user_edited:
+        note.content = content
 
 
 class ChatRequest(BaseModel):
@@ -173,17 +239,14 @@ async def _advance_to_next_topic(
     return next_topic
 
 
-@router.post("/explain/{topic_id}")
+@router.post("/explain/{topic_id}", dependencies=[Depends(ai_rate_limit)])
 async def explain_topic(
     topic_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Stream explanation for a topic."""
-    topic_result = await db.execute(select(Topic).where(Topic.id == topic_id))
-    topic = topic_result.scalar_one_or_none()
-    if not topic:
-        raise HTTPException(status_code=404, detail="Topic not found")
+    topic = await owned_topic(db, topic_id, current_user)
 
     subject_result = await db.execute(select(Subject).where(Subject.id == topic.subject_id))
     subject = subject_result.scalar_one_or_none()
@@ -205,16 +268,24 @@ async def explain_topic(
     await db.commit()
 
     async def stream_and_save():
-        full_content = ""
-        async for chunk in tutor_explain_topic(
+        # RAG: ground the lesson in the student's library
+        reference_ctx, sources = await rag.grounded_context(
+            db, subject.id, f"{topic.title}: {topic_ctx['current_subtopic']}"
+        )
+        if sources:
+            yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
+
+        parts: List[str] = []
+        async for event in _relay_tutor(tutor_explain_topic(
             topic_title=topic.title,
             subject=subject.name,
             previous_context=previous_context,
             persona_context=persona_ctx,
             topic_position=topic_ctx,
-        ):
-            full_content += chunk
-            yield f"data: {json.dumps({'chunk': chunk, 'type': 'text'})}\n\n"
+            reference_context=reference_ctx,
+        ), parts):
+            yield event
+        full_content = "".join(parts)
 
         # Save message and update topic content
         msg = Message(
@@ -223,9 +294,11 @@ async def explain_topic(
             role="assistant",
             content=full_content,
             agent_type="tutor",
+            metadata_=_message_metadata(sources),
         )
         db.add(msg)
         topic.explanation_content = full_content
+        db.add(topic)  # re-attach: FastAPI closes the request session before streaming starts
 
         # Scribe: generate notes in background
         yield f"data: {json.dumps({'type': 'notes_generating'})}\n\n"
@@ -234,30 +307,29 @@ async def explain_topic(
             subject=subject.name,
             explanation_content=full_content,
         )
+        await _save_topic_notes(db, topic, notes_content)
         yield f"data: {json.dumps({'type': 'notes_ready', 'notes': notes_content})}\n\n"
         await db.commit()
+        rag.schedule_lesson_index(topic.id, current_user.id)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(stream_and_save(), media_type="text/event-stream")
 
 
-@router.post("/doubt")
+@router.post("/doubt", dependencies=[Depends(ai_rate_limit)])
 async def handle_doubt(
     data: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Handle a student message — either a doubt or a navigation command."""
-    topic_result = await db.execute(select(Topic).where(Topic.id == data.topic_id))
-    topic = topic_result.scalar_one_or_none()
-    if not topic:
-        raise HTTPException(status_code=404, detail="Topic not found")
+    topic = await owned_topic(db, data.topic_id, current_user)
 
     subject_result = await db.execute(select(Subject).where(Subject.id == topic.subject_id))
     subject = subject_result.scalar_one_or_none()
 
     # ── Intent Detection ──────────────────────────────────────────
-    if is_navigation_command(data.message):
+    if await is_navigation_command(data.message):
         return await _handle_topic_advance(
             current_topic=topic,
             subject=subject,
@@ -296,17 +368,25 @@ async def handle_doubt(
     await db.commit()
 
     async def stream_response():
-        full_content = ""
-        async for chunk in tutor_handle_doubt(
+        # RAG: rewrite the follow-up into a standalone query, then retrieve
+        reference_ctx, sources, search_query = await rag.conversational_context(
+            db, subject.id, data.message, topic.title, history
+        )
+        if sources:
+            yield f"data: {json.dumps({'type': 'sources', 'sources': sources, 'query': search_query})}\n\n"
+
+        parts: List[str] = []
+        async for event in _relay_tutor(tutor_handle_doubt(
             doubt=data.message,
             topic_title=topic.title,
             explanation_so_far=topic.explanation_content or "",
             persona_context=persona_ctx,
             conversation_history=history,
             topic_position=topic_ctx,
-        ):
-            full_content += chunk
-            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+            reference_context=reference_ctx,
+        ), parts):
+            yield event
+        full_content = "".join(parts)
 
         ai_msg = Message(
             topic_id=topic.id,
@@ -314,6 +394,7 @@ async def handle_doubt(
             role="assistant",
             content=full_content,
             agent_type="tutor",
+            metadata_=_message_metadata(sources, search_query),
         )
         db.add(ai_msg)
 
@@ -371,17 +452,24 @@ async def _handle_topic_advance(
             # Add a visual separator if this is the same topic stream
             chunk_data = json.dumps({'chunk': '\n\n---\n\n', 'type': 'text'})
             yield f"data: {chunk_data}\n\n"
-            
-            full_content = ""
-            async for chunk in tutor_explain_topic(
+
+            reference_ctx, sources = await rag.grounded_context(
+                db, subject.id, f"{current_topic.title}: {topic_ctx['current_subtopic']}"
+            )
+            if sources:
+                yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
+
+            parts: List[str] = []
+            async for event in _relay_tutor(tutor_explain_topic(
                 topic_title=current_topic.title,
                 subject=subject.name,
                 previous_context="", # Skip previous context for subtopics to keep it focused
                 persona_context=persona_ctx_str,
                 topic_position=topic_ctx,
-            ):
-                full_content += chunk
-                yield f"data: {json.dumps({'chunk': chunk, 'type': 'text'})}\n\n"
+                reference_context=reference_ctx,
+            ), parts):
+                yield event
+            full_content = "".join(parts)
 
             msg = Message(
                 topic_id=current_topic.id,
@@ -389,10 +477,12 @@ async def _handle_topic_advance(
                 role="assistant",
                 content=full_content,
                 agent_type="tutor",
+                metadata_=_message_metadata(sources),
             )
             db.add(msg)
             existing_content = current_topic.explanation_content or ""
             current_topic.explanation_content = existing_content + "\n\n" + full_content
+            db.add(current_topic)  # re-attach: FastAPI closes the request session before streaming starts
 
             yield f"data: {json.dumps({'type': 'notes_generating'})}\n\n"
             notes_content = await scribe_generate_notes(
@@ -400,8 +490,10 @@ async def _handle_topic_advance(
                 subject=subject.name,
                 explanation_content=current_topic.explanation_content,
             )
+            await _save_topic_notes(db, current_topic, notes_content)
             yield f"data: {json.dumps({'type': 'notes_ready', 'notes': notes_content})}\n\n"
             await db.commit()
+            rag.schedule_lesson_index(current_topic.id, user.id)
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         return StreamingResponse(stream_next_subtopic(), media_type="text/event-stream")
@@ -449,16 +541,23 @@ async def _handle_topic_advance(
         # Notify frontend about the topic change
         yield f"data: {json.dumps({'type': 'topic_advanced', 'new_topic_id': str(next_topic.id), 'new_topic_title': next_topic.title, 'completed_topic_id': str(current_topic.id)})}\n\n"
 
-        full_content = ""
-        async for chunk in tutor_explain_topic(
+        reference_ctx, sources = await rag.grounded_context(
+            db, subject.id, f"{next_topic.title}: {topic_ctx['current_subtopic']}"
+        )
+        if sources:
+            yield f"data: {json.dumps({'type': 'sources', 'sources': sources})}\n\n"
+
+        parts: List[str] = []
+        async for event in _relay_tutor(tutor_explain_topic(
             topic_title=next_topic.title,
             subject=subject.name,
             previous_context=previous_context,
             persona_context=persona_ctx_str,
             topic_position=topic_ctx,
-        ):
-            full_content += chunk
-            yield f"data: {json.dumps({'chunk': chunk, 'type': 'text'})}\n\n"
+            reference_context=reference_ctx,
+        ), parts):
+            yield event
+        full_content = "".join(parts)
 
         msg = Message(
             topic_id=next_topic.id,
@@ -466,9 +565,11 @@ async def _handle_topic_advance(
             role="assistant",
             content=full_content,
             agent_type="tutor",
+            metadata_=_message_metadata(sources),
         )
         db.add(msg)
         next_topic.explanation_content = full_content
+        db.add(next_topic)  # re-attach: FastAPI closes the request session before streaming starts
 
         # Generate notes for new topic
         yield f"data: {json.dumps({'type': 'notes_generating'})}\n\n"
@@ -477,8 +578,10 @@ async def _handle_topic_advance(
             subject=subject.name,
             explanation_content=full_content,
         )
+        await _save_topic_notes(db, next_topic, notes_content)
         yield f"data: {json.dumps({'type': 'notes_ready', 'notes': notes_content})}\n\n"
         await db.commit()
+        rag.schedule_lesson_index(next_topic.id, user.id)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(stream_next(), media_type="text/event-stream")
@@ -490,8 +593,9 @@ async def get_history(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    topic = await owned_topic(db, topic_id, current_user)
     msgs_result = await db.execute(
-        select(Message).where(Message.topic_id == topic_id).order_by(Message.created_at)
+        select(Message).where(Message.topic_id == topic.id).order_by(Message.created_at)
     )
     msgs = msgs_result.scalars().all()
     return [
@@ -500,6 +604,9 @@ async def get_history(
             "role": m.role,
             "content": m.content,
             "agent_type": m.agent_type,
+            "sources": (m.metadata_ or {}).get("sources", []),
+            "query": (m.metadata_ or {}).get("query"),
+            "ai_fallback": bool((m.metadata_ or {}).get("ai_fallback")),
             "created_at": m.created_at.isoformat() if m.created_at else None,
         }
         for m in msgs

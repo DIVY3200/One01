@@ -2,12 +2,14 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api } from '@/lib/api'
+import { useStudyTimer } from '@/lib/useStudyTimer'
 import { useStore } from '@/store/useStore'
 import toast from 'react-hot-toast'
-import { LayoutList, MessageCircle, ClipboardList } from 'lucide-react'
+import { LayoutList, MessageCircle, ClipboardList, Library, type LucideIcon } from 'lucide-react'
 import ChatWindow from '@/components/chat/ChatWindow'
 import OutlinePanel from '@/components/outline/OutlinePanel'
 import QuizPanel from '@/components/quiz/QuizPanel'
+import LibraryPanel from '@/components/library/LibraryPanel'
 
 interface Topic {
   id: string
@@ -16,10 +18,11 @@ interface Topic {
   status: 'pending' | 'in_progress' | 'completed'
 }
 
-type TabType = 'chat' | 'outline' | 'quiz'
+type TabType = 'chat' | 'outline' | 'quiz' | 'library'
 
 export default function LearnPage() {
   const { subjectId } = useParams<{ subjectId: string }>()
+  useStudyTimer(subjectId)
   const { setActiveSubject } = useStore()
   const [subject, setSubject] = useState<{ name: string; level: string; purpose: string } | null>(null)
   const [topics, setTopics] = useState<Topic[]>([])
@@ -70,10 +73,11 @@ export default function LearnPage() {
     if (next) { setActiveTopic(next); setTab('chat') }
   }
 
-  const TABS: { id: TabType; label: string; Icon: React.ComponentType<{ size: number }> }[] = [
+  const TABS: { id: TabType; label: string; Icon: LucideIcon }[] = [
     { id: 'chat', label: 'Chat', Icon: MessageCircle },
     { id: 'outline', label: 'Outline', Icon: LayoutList },
     { id: 'quiz', label: 'Quiz', Icon: ClipboardList },
+    { id: 'library', label: 'Library', Icon: Library },
   ]
 
   return (
@@ -136,6 +140,8 @@ export default function LearnPage() {
             ? <QuizPanel />
             : <div className="flex-1 flex items-center justify-center text-muted text-sm">Select a topic first.</div>
         )}
+
+        {tab === 'library' && <LibraryPanel />}
       </div>
     </div>
   )

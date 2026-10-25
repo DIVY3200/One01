@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
@@ -7,6 +7,7 @@ from typing import Optional
 from db.database import get_db
 from db.models import Note, Subject, Topic, User
 from utils.auth import get_current_user
+from utils.ownership import owned_note, owned_subject
 
 router = APIRouter()
 
@@ -26,6 +27,8 @@ async def sync_insight(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    subject_id = (await owned_subject(db, subject_id, current_user)).id
+
     # 1. Append insight to the subject's general notes
     note_result = await db.execute(select(Note).where(Note.subject_id == subject_id, Note.topic_id == None))
     note = note_result.scalar_one_or_none()
@@ -67,10 +70,11 @@ async def get_notes(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    subject = await owned_subject(db, subject_id, current_user)
     result = await db.execute(
         select(Note, Topic.title)
         .join(Topic, Note.topic_id == Topic.id, isouter=True)
-        .where(Note.subject_id == subject_id)
+        .where(Note.subject_id == subject.id)
         .order_by(Note.created_at)
     )
     rows = result.all()
@@ -94,10 +98,7 @@ async def update_note(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Note).where(Note.id == note_id))
-    note = result.scalar_one_or_none()
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
+    note = await owned_note(db, note_id, current_user)
     note.content = data.content
     note.is_user_edited = True
     await db.commit()

@@ -6,6 +6,7 @@ import toast from 'react-hot-toast'
 import { BookOpen, CheckCircle2 } from 'lucide-react'
 import ChatMessage from './ChatMessage'
 import ChatInput from './ChatInput'
+import type { Source } from '@/components/library/SourceList'
 
 interface Topic {
   id: string
@@ -19,6 +20,9 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   agent_type?: string
+  sources?: Source[]
+  query?: string
+  ai_fallback?: boolean
 }
 
 interface ChatWindowProps {
@@ -81,6 +85,16 @@ export default function ChatWindow({
       (data) => {
         setQuizReady(true)
         if (data?.notes) toast.success('Notes generated!', { icon: '📝' })
+      },
+      (event) => {
+        if (event.type === 'sources') {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === aiMsg.id ? { ...m, sources: event.sources as Source[] } : m))
+          )
+        }
+        if (event.type === 'ai_fallback') {
+          setMessages((prev) => prev.map((m) => (m.id === aiMsg.id ? { ...m, ai_fallback: true } : m)))
+        }
       }
     )
     setExplaining(false)
@@ -118,6 +132,20 @@ export default function ChatWindow({
       },
       // onEvent — handle topic advancement, subject completion, etc.
       (event) => {
+        if (event.type === 'sources') {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === aiMsg.id
+                ? { ...m, sources: event.sources as Source[], query: event.query as string | undefined }
+                : m
+            )
+          )
+        }
+
+        if (event.type === 'ai_fallback') {
+          setMessages((prev) => prev.map((m) => (m.id === aiMsg.id ? { ...m, ai_fallback: true } : m)))
+        }
+
         if (event.type === 'topic_advanced') {
           advancedToNewTopic = true
           const newId = event.new_topic_id as string
@@ -208,6 +236,9 @@ export default function ChatWindow({
             content={msg.content}
             isStreaming={(explaining || streaming) && msg.content === ''}
             onSend={(text) => handleSend(text)}
+            sources={msg.sources}
+            query={msg.query}
+            aiFallback={msg.ai_fallback}
           />
         ))}
         <div ref={bottomRef} />

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, Integer, Float, Boolean, ForeignKey, JSON, TIMESTAMP, Uuid as UUID
+from sqlalchemy import Column, String, Text, Integer, Float, Boolean, ForeignKey, JSON, TIMESTAMP, LargeBinary, Uuid as UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import uuid
@@ -47,6 +47,7 @@ class Subject(Base):
     progress = relationship("Progress", back_populates="subject", uselist=False, cascade="all, delete-orphan", passive_deletes=True)
     feedback = relationship("Feedback", back_populates="subject", cascade="all, delete-orphan", passive_deletes=True)
     weak_points = relationship("WeakPoint", back_populates="subject", cascade="all, delete-orphan", passive_deletes=True)
+    documents = relationship("Document", back_populates="subject", cascade="all, delete-orphan", passive_deletes=True)
 
 
 class Topic(Base):
@@ -82,6 +83,7 @@ class Message(Base):
 class QuizSet(Base):
     __tablename__ = "quiz_sets"
     id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    subject_id = Column(UUID(as_uuid=False), ForeignKey("subjects.id", ondelete="CASCADE"), index=True)
     topic_id = Column(UUID(as_uuid=False), ForeignKey("topics.id", ondelete="CASCADE"))
     quiz_type = Column(String(30), nullable=False)
     questions = Column(JSON, nullable=False)
@@ -152,3 +154,37 @@ class WeakPoint(Base):
     user_id = Column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"))
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     subject = relationship("Subject", back_populates="weak_points")
+
+class Document(Base):
+    """A source in a subject's RAG library: an uploaded file or a saved lesson."""
+    __tablename__ = "documents"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    subject_id = Column(UUID(as_uuid=False), ForeignKey("subjects.id", ondelete="CASCADE"), index=True)
+    user_id = Column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"))
+    topic_id = Column(UUID(as_uuid=False), ForeignKey("topics.id", ondelete="CASCADE"), nullable=True)
+    filename = Column(String(500), nullable=False)
+    source_type = Column(String(20), default="upload")  # upload, lesson
+    size_bytes = Column(Integer, default=0)
+    num_pages = Column(Integer)
+    num_chunks = Column(Integer, default=0)
+    embedding_model = Column(String(100))  # None → keyword search only
+    status = Column(String(20), default="ready")  # ready, failed
+    error = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    subject = relationship("Subject", back_populates="documents")
+    chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan", passive_deletes=True)
+
+
+class DocumentChunk(Base):
+    __tablename__ = "document_chunks"
+    id = Column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    document_id = Column(UUID(as_uuid=False), ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    subject_id = Column(UUID(as_uuid=False), ForeignKey("subjects.id", ondelete="CASCADE"), index=True)
+    chunk_index = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    page = Column(Integer)
+    heading = Column(String(500))
+    embedding = Column(LargeBinary)  # float32 unit vector
+    embedding_model = Column(String(100))
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    document = relationship("Document", back_populates="chunks")

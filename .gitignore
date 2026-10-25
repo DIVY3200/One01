@@ -1,48 +1,36 @@
-cat > .gitignore <<'EOF'
 # Secrets
 .env
 .env.*
-
-# Python
-venv/
-__pycache__/
-*.py[cod]
-
-# Node
-node_modules/
-.next/
-dist/
-build/
-
-# Logs
-*.log
-err.txt
-pip_log.txt
-
-# IDE files
-.idea/
-EOFcat >> .gitignore <<'EOF'
-
-# Secrets
-.env
-.env.*
+!.env.example
 
 # Python
 venv/
 .venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
-# Node
+# Local databases (user data, never commit)
+*.db
+*.sqlite
+*.sqlite3
+
+# Node / Next.js
 node_modules/
 .next/
 dist/
 build/
+*.tsbuildinfo
+
+# Logs and debug output
+*.log
+err.txt
+error.txt
+pip_log.txt
+full_log.txt
+backend_logs*.txt
+build-errors*.txt
+frontend_out.txt
 
 # IDE
 .idea/
-
-# Logs
-*.log
-err.txt
-pip_log.txt

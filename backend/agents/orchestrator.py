@@ -1,8 +1,8 @@
 """
 One01 Multi-Agent Orchestrator
-Council of Agents (Powered by Google Gemini 1.5 Flash):
+Council of Agents (Powered by Google Gemini — model set by GEMINI_MODEL):
   - Professor Agent: curriculum mapping, outline generation
-  - Tutor Agent: persona-based teaching, explanations
+  - Tutor Agent: persona-based teaching, explanations (RAG-grounded, streamed)
   - Examiner Agent: quiz generation, gap analysis
   - Scribe Agent: note generation, progress updates
 """
@@ -13,22 +13,9 @@ import asyncio
 import traceback
 from typing import AsyncGenerator, Optional
 
+from agents import fallback
+from llm import gemini
 from utils.config import settings
-
-# ─── Gemini Setup ─────────────────────────────────────────────────
-_gemini_model = None
-
-def _get_gemini_model():
-    global _gemini_model
-    if _gemini_model is not None:
-        return _gemini_model
-    gemini_key = os.getenv("GEMINI_API_KEY", "") or settings.GEMINI_API_KEY
-    if not gemini_key or gemini_key == "your-gemini-api-key-here":
-        return None
-    import google.generativeai as genai
-    genai.configure(api_key=gemini_key)
-    _gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-    return _gemini_model
 
 def _sanitize_json_response(raw: str) -> str:
     """Strip markdown fences, conversational preamble, and extract raw JSON."""
@@ -49,26 +36,7 @@ def _sanitize_json_response(raw: str) -> str:
 
 async def _gemini_generate(prompt: str, json_mode: bool = False, timeout: int = 90, temperature: float = 1.0) -> str:
     """Call Gemini and return raw text. Returns None if no key or on timeout."""
-    model = _get_gemini_model()
-    if model is None:
-        return None
-    import google.generativeai as genai
-    config = genai.types.GenerationConfig(temperature=temperature)
-    if json_mode:
-        config.response_mime_type = "application/json"
-    try:
-        response = await asyncio.wait_for(
-            model.generate_content_async(prompt, generation_config=config),
-            timeout=timeout,
-        )
-        return response.text
-    except asyncio.TimeoutError:
-        print(f"[TIMEOUT] Gemini call timed out after {timeout}s")
-        return None
-    except Exception as e:
-        print(f"[ERROR] Gemini generation failed: {e}")
-        traceback.print_exc()
-        return None
+    return await gemini.generate(prompt, json_mode=json_mode, timeout=timeout, temperature=temperature)
 
 
 from agents.persona_manager import PersonaManager
@@ -177,7 +145,7 @@ Return ONLY valid JSON with this exact structure:
             break  # Don't retry if the LLM itself is unavailable
 
     # MOCK FALLBACK (Dynamic to avoid fixed generic templates)
-    print("Using MOCK FALLBACK for Professor Agent")
+    fallback.note("Professor")
     await asyncio.sleep(0.5)
     
     mock_topics = []
@@ -391,8 +359,12 @@ async def tutor_explain_topic(
     previous_context: str,
     persona_context: str,
     topic_position: dict = None,
+    reference_context: str = "",
 ) -> AsyncGenerator[str, None]:
-    """Stream a topic explanation with position-aware, non-repetitive content."""
+    """Stream a topic explanation with position-aware, non-repetitive content.
+
+    reference_context is the RAG grounding block (retrieved library passages).
+    """
     tp = topic_position or {}
     current_idx = tp.get("current_index", 0)
     total = tp.get("total_topics", 1)
@@ -423,6 +395,8 @@ CRITICAL RULES:
 
 Previous context: {previous_context or "This is the first topic — no prior context."}
 
+{reference_context}
+
 SYSTEM INSTRUCTION: You are a world-class professor. Stop using 'cookie-cutter' responses. Your goal is mastery, not just completion. If a student asks for depth, prioritize Content Depth over Structural Consistency. 
 Give them raw technical insight, research-grade definitions, and complex logical flows.
 
@@ -451,19 +425,13 @@ Teach the current sub-topic ("{current_subtopic}") rigorously (Broad Overview):
 
 Do NOT use cliché phrases. Emphasize Content Depth over Structural Consistency."""
 
-    result = await _gemini_generate(prompt)
-    if result:
-        words = result.split(' ')
-        chunk = ""
-        for i, word in enumerate(words):
-            chunk += word + " "
-            if len(chunk) > 30 or i == len(words) - 1:
-                yield chunk
-                chunk = ""
-                await asyncio.sleep(0.02)
-    else:
+    streamed = False
+    async for chunk in gemini.stream(prompt):
+        streamed = True
+        yield chunk
+    if not streamed:
         # MOCK FALLBACK — pick a different structure per topic index
-        print(f"Using MOCK FALLBACK for Tutor Agent (explain) — topic index {current_idx}")
+        fallback.note("Tutor")
         struct_idx = current_idx % len(_MOCK_STRUCTURES)
         mock_explanation = _MOCK_STRUCTURES[struct_idx](topic_title, subject, prev_title, next_title)
         mock_explanation += f"\n\n```quiz\n{{\n  \"question\": \"What is the primary role of {current_subtopic} in {subject}?\",\n  \"options\": [\"To act as a core component\", \"It is mostly unused\", \"It provides advanced capabilities\", \"All of the above\"],\n  \"correctIndex\": 0,\n  \"content_hash\": \"mock_hash_{current_idx}_{current_sub_idx}\"\n}}\n```"
@@ -481,8 +449,12 @@ async def tutor_handle_doubt(
     persona_context: str,
     conversation_history: list,
     topic_position: dict = None,
+    reference_context: str = "",
 ) -> AsyncGenerator[str, None]:
-    """Handle a student's doubt with adaptive, non-repetitive teaching."""
+    """Handle a student's doubt with adaptive, non-repetitive teaching.
+
+    reference_context is the RAG grounding block (retrieved library passages).
+    """
     tp = topic_position or {}
     current_idx = tp.get("current_index", 0)
     next_title = tp.get("next_title")
@@ -512,6 +484,8 @@ Recent conversation (Turn {turn_counter}):
 
 The student responds: "{doubt}"
 
+{reference_context}
+
 SYSTEM INSTRUCTION: You are a world-class professor. Stop using 'cookie-cutter' responses. Your goal is mastery, not completion. If a student asks for depth, prioritize Content Depth over Structural Consistency.
 Give them raw technical insight, research-grade definitions, and complex logical flows.
 
@@ -535,19 +509,13 @@ RULES:
 
 End naturally, then output the ```quiz codeblock if testing a concept. Use markdown."""
 
-    result = await _gemini_generate(prompt)
-    if result:
-        words = result.split(' ')
-        chunk = ""
-        for i, word in enumerate(words):
-            chunk += word + " "
-            if len(chunk) > 30 or i == len(words) - 1:
-                yield chunk
-                chunk = ""
-                await asyncio.sleep(0.02)
-    else:
+    streamed = False
+    async for chunk in gemini.stream(prompt):
+        streamed = True
+        yield chunk
+    if not streamed:
         # MOCK FALLBACK — varied responses
-        print("Using MOCK FALLBACK for Tutor Agent (doubt)")
+        fallback.note("Tutor")
         # Pick a varied response style based on conversation length
         turn_count = len(conversation_history)
         
@@ -694,7 +662,7 @@ Return ONLY valid JSON array containing the questions, or a JSON object with 'qu
             print(f"[RAW] {result[:300]}")
 
     # MOCK FALLBACK
-    print("Using MOCK FALLBACK for Examiner Agent")
+    fallback.note("Examiner")
     await asyncio.sleep(0.5)
     return {
         "quiz_type": quiz_type,
@@ -804,7 +772,7 @@ Analyze and return ONLY valid JSON:
             print(f"[RAW] {result[:300]}")
 
     # MOCK FALLBACK
-    print("Using MOCK FALLBACK for Examiner Analyze")
+    fallback.note("Examiner")
     correct_count = 0
     per_question = []
     for i, (q, a) in enumerate(zip(questions, user_answers)):
@@ -885,7 +853,7 @@ Return ONLY the markdown content."""
         return result
 
     # MOCK FALLBACK
-    print("Using MOCK FALLBACK for Scribe Agent")
+    fallback.note("Scribe")
     return f"""# {topic_title}
 
 ## 📌 Key Definitions
@@ -962,7 +930,7 @@ Analyze this feedback and return ONLY valid JSON:
             print(f"[RAW] {result[:300]}")
 
     # MOCK FALLBACK
-    print("Using MOCK FALLBACK for Scribe Feedback")
+    fallback.note("Scribe")
     return {
         "tone_adjustment": "Maintaining current tone with slight adjustments based on feedback.",
         "pace_adjustment": "Adjusting pace to match student comfort level.",
@@ -1008,7 +976,7 @@ For numerical: {{"question": "...", "solution_steps": ["..."], "final_answer": "
             print(f"[RAW] {result[:300]}")
 
     # MOCK FALLBACK
-    print("Using MOCK FALLBACK for Question Bank")
+    fallback.note("Examiner")
     questions = []
     for i in range(min(count, 5)):
         questions.append({

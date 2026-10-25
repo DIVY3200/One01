@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -8,8 +8,20 @@ from db.database import get_db
 from db.models import Topic, Subject, QuizSet, QuizAttempt, Progress, User
 from agents.orchestrator import examiner_generate_quiz, examiner_analyze_answers
 from utils.auth import get_current_user
+from utils.ownership import owned_quiz_set, owned_subject, owned_topic
+from utils.rate_limit import ai_rate_limit
 
 router = APIRouter()
+
+
+async def subject_quiz_average(db: AsyncSession, subject_id: str, user_id: str) -> float:
+    """Mean score over every quiz attempt the user has made in this subject."""
+    result = await db.execute(
+        select(func.avg(QuizAttempt.score))
+        .join(QuizSet, QuizAttempt.quiz_set_id == QuizSet.id)
+        .where(QuizSet.subject_id == subject_id, QuizAttempt.user_id == user_id)
+    )
+    return float(result.scalar() or 0)
 
 
 class GenerateQuizRequest(BaseModel):
@@ -26,7 +38,7 @@ class SubmitAnswersRequest(BaseModel):
     answers: List[str]
 
 
-@router.post("/generate")
+@router.post("/generate", dependencies=[Depends(ai_rate_limit)])
 async def generate_quiz(
     data: GenerateQuizRequest,
     current_user: User = Depends(get_current_user),
@@ -34,19 +46,20 @@ async def generate_quiz(
 ):
     topic = None
     if data.topic_id:
-        topic_result = await db.execute(select(Topic).where(Topic.id == data.topic_id))
-        topic = topic_result.scalar_one_or_none()
-        if not topic:
-            raise HTTPException(status_code=404, detail="Topic not found")
+        topic = await owned_topic(db, data.topic_id, current_user)
 
     subject_id_to_use = topic.subject_id if topic else data.subject_id
     if not subject_id_to_use:
         raise HTTPException(status_code=400, detail="Missing subject_id or topic_id")
 
-    subject_result = await db.execute(select(Subject).where(Subject.id == subject_id_to_use))
-    subject = subject_result.scalar_one_or_none()
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    subject = await owned_subject(db, subject_id_to_use, current_user)
+
+    # The Quiz tab sends a topic title rather than an ID; link the quiz to that topic when it matches
+    if topic is None and data.topic_title:
+        topic_result = await db.execute(
+            select(Topic).where(Topic.subject_id == subject.id, Topic.title == data.topic_title)
+        )
+        topic = topic_result.scalars().first()
 
     topic_title = topic.title if topic else data.topic_title
 
@@ -95,13 +108,14 @@ async def generate_quiz(
             subject=subject.name,
             level=subject.level,
             quiz_type=qt,
-            explanation_content=topic.explanation_content if topic else "",
+            explanation_content=(topic.explanation_content or "") if topic else "",  # topic may not be taught yet
             weak_concepts=weak_concepts,
             subtopics=subtopics,
             past_questions=past_questions,
             count=data.count,
         )
         qs = QuizSet(
+            subject_id=subject.id,
             topic_id=topic.id if topic else None,
             quiz_type=qt,
             questions=quiz_data.get("questions", []),
@@ -119,19 +133,18 @@ async def generate_quiz(
     return {"quiz_sets": created_sets}
 
 
-@router.post("/submit")
+@router.post("/submit", dependencies=[Depends(ai_rate_limit)])
 async def submit_answers(
     data: SubmitAnswersRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    qs_result = await db.execute(select(QuizSet).where(QuizSet.id == data.quiz_set_id))
-    quiz_set = qs_result.scalar_one_or_none()
-    if not quiz_set:
-        raise HTTPException(status_code=404, detail="Quiz set not found")
+    quiz_set = await owned_quiz_set(db, data.quiz_set_id, current_user)
 
-    topic_result = await db.execute(select(Topic).where(Topic.id == quiz_set.topic_id))
-    topic = topic_result.scalar_one_or_none()
+    topic = None
+    if quiz_set.topic_id:
+        topic_result = await db.execute(select(Topic).where(Topic.id == quiz_set.topic_id))
+        topic = topic_result.scalar_one_or_none()
 
     # Examiner analyzes answers
     analysis = await examiner_analyze_answers(
@@ -150,17 +163,11 @@ async def submit_answers(
         feedback=analysis.get("detailed_feedback", ""),
     )
     db.add(attempt)
+    await db.flush()  # so the new attempt counts in the average below
 
-    # Update progress weak/strong concepts
-    subject_id_to_use = topic.subject_id if topic else None
-    if not subject_id_to_use:
-        # If no topic, try to find subject from quiz_set's context if available, otherwise just skip progress update
-        pass # Handle dynamic quizzes that lack topic
-
-    subject = None
-    if subject_id_to_use:
-        subject_result = await db.execute(select(Subject).where(Subject.id == subject_id_to_use))
-        subject = subject_result.scalar_one_or_none()
+    # Update progress weak/strong concepts (subject-wide quizzes included)
+    subject_result = await db.execute(select(Subject).where(Subject.id == quiz_set.subject_id))
+    subject = subject_result.scalar_one_or_none()
 
     if subject:
         progress_result = await db.execute(
@@ -176,8 +183,7 @@ async def submit_answers(
             current_weak -= current_strong
             progress.weak_concepts = list(current_weak)
             progress.strong_concepts = list(current_strong)
-            # Rolling average score
-            progress.avg_quiz_score = (progress.avg_quiz_score + analysis.get("score", 0)) / 2
+            progress.avg_quiz_score = await subject_quiz_average(db, subject.id, current_user.id)
 
         # Parallel Note Synchronization (Scribe Agent)
         from db.models import Note
@@ -215,6 +221,7 @@ async def get_quiz_sets(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(QuizSet).where(QuizSet.topic_id == topic_id))
+    topic = await owned_topic(db, topic_id, current_user)
+    result = await db.execute(select(QuizSet).where(QuizSet.topic_id == topic.id))
     sets = result.scalars().all()
     return [{"id": str(s.id), "quiz_type": s.quiz_type, "questions": s.questions} for s in sets]

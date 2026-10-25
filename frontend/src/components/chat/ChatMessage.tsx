@@ -5,15 +5,41 @@ import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import { useStore } from '@/store/useStore'
 import QuickQuiz from './QuickQuiz'
+import SourceList, { Source, sourceLabel } from '@/components/library/SourceList'
 
 interface ChatMessageProps {
   role: 'user' | 'assistant'
   content: string
   isStreaming?: boolean
   onSend?: (text: string) => void
+  sources?: Source[]
+  query?: string
+  aiFallback?: boolean // sample content because Gemini was unavailable
 }
 
-export default function ChatMessage({ role, content, isStreaming, onSend }: ChatMessageProps) {
+// A run of inline citations: [2], [1][3] or [1, 2]. Not a[1], [x](url) or [ref]: defs.
+const CITATION_RUN = /(?<![\w\]])((?:\[\d{1,2}(?:,\s*\d{1,2})*\])+)(?![(\[:])/g
+
+// Turn inline citations into links the renderer shows as badges.
+// Code fences are left untouched so array indexing such as x = [1] survives.
+function linkCitations(markdown: string, count: number) {
+  if (!count) return markdown
+  return markdown
+    .split(/(```[\s\S]*?```)/g)
+    .map((part, i) =>
+      i % 2
+        ? part
+        : part.replace(CITATION_RUN, (run) => {
+            const nums = (run.match(/\d+/g) ?? []).map(Number)
+            return nums.every((n) => n >= 1 && n <= count)
+              ? nums.map((n) => `[${n}](#cite-${n})`).join('')
+              : run
+          })
+    )
+    .join('')
+}
+
+export default function ChatMessage({ role, content, isStreaming, onSend, sources, query, aiFallback }: ChatMessageProps) {
   const { preferences } = useStore()
   const aiName = preferences?.ai_teacher_name || 'Lead'
 
@@ -37,6 +63,11 @@ export default function ChatMessage({ role, content, isStreaming, onSend }: Chat
           content === '' && isStreaming ? 'streaming-cursor' : ''
         }`}
       >
+        {aiFallback && (
+          <p className="mb-3 px-3 py-1.5 rounded-md bg-warn/10 border border-warn/30 text-[11px] text-warn">
+            Sample content — Gemini was unavailable, so this isn&apos;t a real AI answer.
+          </p>
+        )}
         <div className="prose-lead text-sm leading-relaxed">
           <ReactMarkdown
             remarkPlugins={[remarkMath, remarkGfm]}
@@ -53,12 +84,28 @@ export default function ChatMessage({ role, content, isStreaming, onSend }: Chat
                     {children}
                   </code>
                 )
-              }
+              },
+              a({ node, href, children, ...props }: any) {
+                if (href?.startsWith('#cite-')) {
+                  const source = sources?.find((s) => s.n === Number(href.slice(6)))
+                  return (
+                    <sup className="citation" title={source ? sourceLabel(source) : undefined}>
+                      {children}
+                    </sup>
+                  )
+                }
+                return (
+                  <a href={href} {...props}>
+                    {children}
+                  </a>
+                )
+              },
             }}
           >
-            {content || ' '}
+            {linkCitations(content || ' ', sources?.length ?? 0)}
           </ReactMarkdown>
         </div>
+        {sources && sources.length > 0 && <SourceList sources={sources} query={query} />}
       </div>
     </div>
   )

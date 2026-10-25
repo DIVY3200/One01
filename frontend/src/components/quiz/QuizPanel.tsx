@@ -144,7 +144,7 @@ export default function QuizPanel() {
       <div className="max-w-2xl mx-auto px-6 py-10">
         <div className="mb-8">
           <p className="text-xs font-mono text-muted uppercase tracking-wider mb-1">Adaptive Learning</p>
-          <h1 className="font-display text-3xl text-lead">Teacher's Quiz</h1>
+          <h1 className="font-display text-3xl text-lead">Teacher&apos;s Quiz</h1>
           <p className="text-sm text-muted mt-1">Generate dynamic conceptual tests.</p>
         </div>
 
@@ -301,7 +301,7 @@ export default function QuizPanel() {
                       <div className="flex items-center gap-2 mb-2">
                         <HelpCircle size={14} className={!q.options || isCorrectUserAnswer ? 'text-accent' : 'text-red-500'} />
                         <span className="text-xs font-bold uppercase tracking-wider text-slate-800 font-mono">
-                          Teacher's Insight
+                          Teacher&apos;s Insight
                         </span>
                         {syncingNote[i] && (
                           <span className="ml-auto flex items-center gap-1 text-[10px] text-muted">

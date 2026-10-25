@@ -136,7 +136,7 @@ export default function FeedbackPage() {
                 </p>
                 {f.ai_response && (
                   <div className="p-3 bg-paper rounded-lg border border-border">
-                    <p className="text-[11px] text-muted font-mono mb-1">Teacher's response</p>
+                    <p className="text-[11px] text-muted font-mono mb-1">Teacher&apos;s response</p>
                     <p className="text-xs text-ink">{f.ai_response}</p>
                   </div>
                 )}

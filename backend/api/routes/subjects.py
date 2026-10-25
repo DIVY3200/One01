@@ -6,9 +6,11 @@ from typing import Optional
 import uuid
 
 from db.database import get_db
-from db.models import Subject, Topic, Progress, UserPreferences, User, Message
+from db.models import Subject, Topic, Progress, UserPreferences, User, Message, QuizSet
 from agents.orchestrator import professor_generate_outline
 from utils.auth import get_current_user
+from utils.ownership import owned_subject
+from utils.rate_limit import ai_rate_limit
 
 router = APIRouter()
 
@@ -19,7 +21,7 @@ class CreateSubjectRequest(BaseModel):
     level: str  # beginner, intermediate, advanced
 
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(ai_rate_limit)])
 async def create_subject(
     data: CreateSubjectRequest,
     request: Request,
@@ -134,12 +136,7 @@ async def get_subject(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(Subject).where(Subject.id == subject_id, Subject.user_id == str(current_user.id))
-    )
-    subject = result.scalar_one_or_none()
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    subject = await owned_subject(db, subject_id, current_user)
 
     topics_result = await db.execute(
         select(Topic).where(Topic.subject_id == subject.id).order_by(Topic.index_order)
@@ -171,23 +168,21 @@ async def delete_subject(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(Subject).where(
-            Subject.id == subject_id,
-            Subject.user_id == str(current_user.id)
-        )
-    )
-    subject = result.scalar_one_or_none()
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
+    subject = await owned_subject(db, subject_id, current_user)
 
     try:
         # Use raw SQL DELETE — the database-level ON DELETE CASCADE ForeignKey
-        # constraints will automatically clean up all child rows (topics, messages,
-        # quiz_sets, attempts, notes, progress, feedback, weak_points).
+        # constraints clean up all child rows (topics, messages, quiz_sets, attempts,
+        # notes, progress, feedback, weak_points). SQLite enforces them because
+        # db/database.py turns foreign keys on for every connection.
         # This avoids the async lazy-loading issue with ORM cascade + db.delete().
         from sqlalchemy import delete as sql_delete
-        await db.execute(sql_delete(Subject).where(Subject.id == subject_id))
+        from rag.service import delete_subject_library
+        await delete_subject_library(db, subject.id)  # also clears the in-memory search index
+        # Subject-wide quizzes: on SQLite databases upgraded by migration 0002 this
+        # column has no FK constraint, so remove them explicitly.
+        await db.execute(sql_delete(QuizSet).where(QuizSet.subject_id == subject.id))
+        await db.execute(sql_delete(Subject).where(Subject.id == subject.id))
         await db.commit()
     except Exception as e:
         await db.rollback()

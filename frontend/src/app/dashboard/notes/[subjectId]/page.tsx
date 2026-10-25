@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { api } from '@/lib/api'
+import { useStudyTimer } from '@/lib/useStudyTimer'
 import toast from 'react-hot-toast'
 import { Loader2 } from 'lucide-react'
 import NoteSidebar from '@/components/notes/NoteSidebar'
@@ -19,6 +20,7 @@ interface Note {
 
 export default function NotesPage() {
   const { subjectId } = useParams<{ subjectId: string }>()
+  useStudyTimer(subjectId)
   const [notes, setNotes] = useState<Note[]>([])
   const [activeNote, setActiveNote] = useState<Note | null>(null)
   const [draft, setDraft] = useState('')

@@ -1,5 +1,5 @@
 'use client'
-import { BarChart2, Clock, CheckCircle2, BookOpen } from 'lucide-react'
+import { BarChart2, Clock, CheckCircle2, BookOpen, type LucideIcon } from 'lucide-react'
 
 interface ProgressStatsProps {
   totalTopics: number
@@ -17,7 +17,7 @@ function StatCard({
   sub,
   accent,
 }: {
-  icon: React.ComponentType<{ size: number; className?: string }>
+  icon: LucideIcon
   label: string
   value: string
   sub?: string

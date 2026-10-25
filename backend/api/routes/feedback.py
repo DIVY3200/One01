@@ -5,9 +5,11 @@ from pydantic import BaseModel
 from typing import Optional
 
 from db.database import get_db
-from db.models import Feedback, Subject, UserPreferences, User
+from db.models import Feedback, UserPreferences, User
 from agents.orchestrator import scribe_process_feedback
 from utils.auth import get_current_user
+from utils.ownership import owned_subject
+from utils.rate_limit import ai_rate_limit
 
 router = APIRouter()
 
@@ -17,15 +19,14 @@ class FeedbackRequest(BaseModel):
     categories: Optional[dict] = None
 
 
-@router.post("/{subject_id}")
+@router.post("/{subject_id}", dependencies=[Depends(ai_rate_limit)])
 async def submit_feedback(
     subject_id: str,
     data: FeedbackRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    subject_result = await db.execute(select(Subject).where(Subject.id == subject_id))
-    subject = subject_result.scalar_one_or_none()
+    subject = await owned_subject(db, subject_id, current_user)
 
     prefs_result = await db.execute(
         select(UserPreferences).where(UserPreferences.user_id == current_user.id)
@@ -34,13 +35,13 @@ async def submit_feedback(
 
     adjustment = await scribe_process_feedback(
         feedback_text=data.content,
-        subject=subject.name if subject else "Unknown",
+        subject=subject.name,
         ai_name=prefs.ai_teacher_name if prefs else "Lead",
         teaching_style=prefs.teaching_style if prefs else "mentor",
     )
 
     fb = Feedback(
-        subject_id=subject_id,
+        subject_id=subject.id,
         user_id=current_user.id,
         content=data.content,
         categories=data.categories,
@@ -62,9 +63,10 @@ async def get_feedback(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    subject = await owned_subject(db, subject_id, current_user)
     result = await db.execute(
         select(Feedback)
-        .where(Feedback.subject_id == subject_id, Feedback.user_id == current_user.id)
+        .where(Feedback.subject_id == subject.id, Feedback.user_id == current_user.id)
         .order_by(Feedback.created_at.desc())
     )
     feedbacks = result.scalars().all()
