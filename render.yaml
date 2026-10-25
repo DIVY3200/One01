@@ -9,6 +9,7 @@ services:
     plan: free
     region: singapore
     healthCheckPath: /health
+    autoDeployTrigger: checksPass # deploy only after GitHub Actions CI passes
     envVars:
       - key: APP_ENV
         value: production

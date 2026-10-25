@@ -1,6 +1,10 @@
 # 🚀 One01 — Adaptive AI Teaching Platform
 
+[![CI](https://github.com/DIVY3200/One01/actions/workflows/ci.yml/badge.svg)](https://github.com/DIVY3200/One01/actions/workflows/ci.yml)
+
 > Your personal AI-powered learning companion powered by a multi-agent system.
+
+**Live demo:** https://one01.vercel.app (free hosting: after about 15 idle minutes the first request can take up to a minute)
 
 ---
 
@@ -26,7 +30,7 @@ One01 is a full-stack AI learning platform that uses a **multi-agent architectur
   - Auto-generated notes with key concepts and formulas
 
 - 📊 **Progress Tracking**
-  - Tracks learning progress and performance
+  - Tracks learning progress, quiz average and study time
 
 - 💬 **Real-time AI Chat**
   - Interactive learning with token-by-token streaming from Gemini
@@ -36,6 +40,38 @@ One01 is a full-stack AI learning platform that uses a **multi-agent architectur
   - Hybrid retrieval (semantic vectors + BM25 keywords) fused with Reciprocal Rank Fusion
   - Lesson memory: every finished lesson is indexed, so later answers build on what you were taught
   - "Ask your library" mode answers strictly from your documents
+
+---
+
+## 🏗️ System Architecture
+
+```
+Browser
+   │  HTTPS
+   ▼
+Next.js 14 frontend (Vercel)            React · TypeScript · Tailwind CSS · Zustand
+   │  REST + Server-Sent Events, JWT in the Authorization header
+   ▼
+FastAPI backend (Render, Docker)
+   ├─ Middleware   CORS allow-list · "sample content" warning header
+   ├─ Routes       auth · subjects · topics · chat (SSE) · quiz · notes · progress · feedback · rag
+   │                 every route: JWT auth → ownership check → per-user AI rate limit
+   ├─ Agents       Professor · Tutor · Examiner · Scribe ───────────────► Google Gemini API
+   ├─ RAG          ingest → chunk → embed → hybrid search (BM25 + vectors) ─► Gemini embeddings
+   └─ Data         SQLAlchemy (async) · Alembic migrations
+   ▼
+PostgreSQL (Neon) in production · SQLite for local development
+```
+
+| Layer | Folder | Responsibility |
+|------|------|------|
+| API | `backend/api/routes/` | HTTP and streaming (SSE) endpoints |
+| Agents | `backend/agents/` | Prompts, persona handling and fallbacks for the four agents |
+| AI client | `backend/llm/gemini.py` | Gemini generation, token streaming and embeddings |
+| RAG | `backend/rag/` | Document ingestion, chunking, embeddings, hybrid retrieval |
+| Data | `backend/db/`, `backend/migrations/` | Models, async engine, versioned schema migrations |
+| Cross-cutting | `backend/utils/` | Auth, ownership checks, rate limiting, settings |
+| Frontend | `frontend/src/` | Pages, chat, quiz, notes, library and progress UI |
 
 ---
 
@@ -86,7 +122,73 @@ Student question ─► query rewrite (Gemini Flash-Lite, uses chat history)
 | Ingestion, lesson memory, grounding prompts | `rag/service.py` |
 | REST + SSE endpoints (`/api/rag/...`) | `api/routes/rag.py` |
 
-Without a `GEMINI_API_KEY` everything still runs: the agents use mock content and retrieval falls back to BM25 keyword search.
+Without a `GEMINI_API_KEY` everything still runs: the agents use mock content (flagged in the UI as sample content) and retrieval falls back to BM25 keyword search.
+
+---
+
+## 🧪 Testing
+
+**87 automated tests** (pytest) run on every push. They use a temporary SQLite database and a fake Gemini, so they are fast, free and need no API key.
+
+| Suite | Type | What it checks | Tests |
+|------|------|------|------|
+| `test_security.py` | Security / integration | 22 cross-user attacks on every route return 404; owners keep access; CORS allow-list | 30 |
+| `test_navigation.py` | Unit + integration | "next" commands advance the lesson, questions get answered | 19 |
+| `test_rag.py` | Integration | PDF/MD/TXT upload, bad files rejected, keyword and hybrid search, cited answers, lesson memory, query rewriting | 13 |
+| `test_ingest.py` | Unit | Chunk size and overlap, Markdown headings, PDF pages | 6 |
+| `test_progress.py` | Integration | Quiz average, subject-wide quizzes, study-time tracking, saved lesson notes | 6 |
+| `test_limits_and_fallback.py` | Integration | Rate limit (429 + Retry-After), sample-content warnings | 5 |
+| `test_gemini_client.py` | Contract | Real Gemini SDK against a local mock server: request format, streaming, batching, failure fallbacks | 4 |
+| `test_migrations.py` | Migration | Fresh database matches the models; old databases are adopted without data loss; Postgres URL handling | 3 |
+| `test_cleanup.py` | Integration | Deleting a subject removes every related row | 1 |
+
+**Techniques:** shared fixtures (`tests/conftest.py`), a deterministic `FakeGemini` swapped in with monkeypatch, a mock HTTP server for the SDK contract tests, an isolated temporary database per run, and a regression test for every bug that was fixed.
+
+**Frontend checks:** TypeScript type check (`tsc --noEmit`), ESLint (`next/core-web-vitals`), and a production build on every Vercel deploy.
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+python -m pytest tests -q
+```
+
+---
+
+## 🔄 CI/CD Pipeline
+
+```
+git push → GitHub (main)
+   │
+   ├─► GitHub Actions CI  (.github/workflows/ci.yml)
+   │      ├─ Backend job:  Python 3.11 → pip install → pytest (87 tests)
+   │      └─ Frontend job: Node 20 → npm ci → tsc --noEmit → ESLint
+   │
+   ├─► Render (backend)   deploys only after CI passes (autoDeployTrigger: checksPass)
+   │      Docker build → start → Alembic migrations → /health check → live
+   │
+   └─► Vercel (frontend)  next build → live at https://one01.vercel.app
+```
+
+- **Continuous integration:** every push and pull request runs the backend tests and the frontend type check and lint.
+- **Continuous deployment:** Render redeploys the backend once the CI checks pass; Vercel rebuilds the frontend on every push.
+- **Infrastructure as code:** `render.yaml` defines the service, region, health check and environment variables; `backend/Dockerfile` defines the image.
+- **Database changes:** Alembic migrations run automatically when the backend starts.
+- **Secrets:** kept in environment variables, never in git (`.env` is ignored, `.dockerignore` keeps it out of the image, Render generates `SECRET_KEY`).
+
+---
+
+## 📋 SDLC
+
+How this project was planned, built and shipped:
+
+| Phase | What was done |
+|------|------|
+| Requirements & analysis | Audited the codebase and ranked the gaps by severity: cross-user data access, broken features (lesson notes, quiz average, feedback history), no tests, no CI |
+| Design | Chose hybrid retrieval (BM25 + vectors) for RAG, one shared ownership-check layer for all routes, Alembic migrations that adopt existing databases, and an explicit warning path when the AI falls back to sample content |
+| Implementation | FastAPI backend and typed Next.js frontend, configuration through environment variables, changes tracked in versioned commits on GitHub |
+| Testing | A regression test for each fixed bug, security tests for every route, migration tests, and live checks against the real Gemini API |
+| Deployment | Docker image, Render Blueprint (infrastructure as code), Vercel, Neon Postgres; step-by-step guide in [DEPLOY.md](https://github.com/DIVY3200/One01/blob/main/DEPLOY.md) |
+| Maintenance | Versioned migrations, `/health` endpoint, startup warning for a missing `SECRET_KEY`, troubleshooting table in DEPLOY.md |
 
 ---
 
@@ -102,7 +204,6 @@ Without a `GEMINI_API_KEY` everything still runs: the agents use mock content an
 - FastAPI
 - Python 3.10–3.11 (pinned SQLAlchemy 2.0.30 does not support 3.13+)
 - SQLAlchemy (Async) + Alembic migrations
-- pytest test suite + GitHub Actions CI
 
 ### AI
 - Google Gemini via the `google-genai` SDK (`gemini-3.5-flash-lite` for teaching and query rewriting)
@@ -112,14 +213,17 @@ Without a `GEMINI_API_KEY` everything still runs: the agents use mock content an
 - Hugging Face `bart-large-mnli` for chat intent detection (optional)
 
 ### Database
-- SQLite (local setup) / PostgreSQL (Docker), chosen by `DATABASE_URL`
+- PostgreSQL (Neon in production, Docker locally) or SQLite for local development, chosen by `DATABASE_URL`
 - Schema managed by Alembic (`backend/migrations`), applied automatically at startup
 
-### Others
-- JWT Authentication, per-user data isolation on every route
-- Per-user AI rate limiting
-- Server-Sent Events (SSE)
-- Docker (optional)
+### Testing & DevOps
+- pytest, FastAPI TestClient, TypeScript type check, ESLint
+- GitHub Actions (CI), Render and Vercel (CD), Docker, Neon
+
+### Security
+- JWT authentication with bcrypt password hashing
+- Per-user data isolation on every route
+- CORS allow-list and per-user AI rate limiting
 
 ---
 
@@ -128,7 +232,7 @@ Without a `GEMINI_API_KEY` everything still runs: the agents use mock content an
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-username/One01.git
+git clone https://github.com/DIVY3200/One01.git
 cd One01
 ```
 
@@ -159,8 +263,7 @@ Database migrations run automatically on startup. After changing `db/models.py`,
 pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
-The tests use a temporary database and a fake Gemini, so they need no API key. GitHub Actions runs them,
-plus the frontend type check and lint, on every push (`.github/workflows/ci.yml`).
+See [Testing](#-testing) for what the 87 tests cover.
 
 ### Run with Docker (Postgres):
 ```bash
@@ -169,7 +272,7 @@ docker-compose up --build
 Docker uses PostgreSQL instead of the local SQLite file, so it starts with an empty database.
 
 ### Deploy online
-Free hosting with Neon (database), Render (backend) and Vercel (frontend): see [DEPLOY.md](DEPLOY.md).
+Free hosting with Neon (database), Render (backend) and Vercel (frontend): see [DEPLOY.md](https://github.com/DIVY3200/One01/blob/main/DEPLOY.md).
 
 ### 3. Frontend Setup
 ```bash
@@ -203,7 +306,7 @@ npm run dev
 | **RAG_MAX_UPLOAD_MB** | Upload size limit (default `20`) |
 | **AI_RATE_LIMIT_PER_MINUTE** | AI requests per user per minute (default `30`, `0` = off) |
 | **HF_TOKEN** | Optional Hugging Face token for the intent classifier |
-| **DATABASE_URL** | `sqlite+aiosqlite:///./test.db` locally, `postgresql://…` in Docker |
+| **DATABASE_URL** | `sqlite+aiosqlite:///./test.db` locally, `postgresql://…` in Docker / production |
 | **SECRET_KEY** | JWT secret (the backend warns at startup if it is missing) |
 | **CORS_ORIGINS** | Allowed frontend URLs (JSON list) |
 
@@ -215,7 +318,7 @@ npm run dev
 - OCR for scanned PDFs
 - Multi-model support (Groq)
 - Shared rate-limit store (Redis) when running several backend workers
-- Deployment on cloud platforms
+- Make Vercel deployments wait for CI as well
 - Advanced analytics dashboard
 
 # 👨‍💻 Author
